@@ -1,9 +1,9 @@
 {
-  "name": "@agentclientprotocol/claude-agent-acp",
+  "name": "@levrik/claude-agent-acp",
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.79.0",
+  "version": "0.79.0-levrik.0",
   "description": "An ACP-compatible coding agent powered by the Claude Agent SDK (TypeScript)",
   "main": "dist/lib.js",
   "types": "dist/lib.d.ts",
