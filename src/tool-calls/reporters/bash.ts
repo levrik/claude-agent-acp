@@ -1,7 +1,30 @@
 import type { BashInput, BashOutput } from "@anthropic-ai/claude-agent-sdk/sdk-tools.js";
+import type { ToolCallContent, ToolCallLocation } from "@agentclientprotocol/sdk/unstable";
 import type { BetaBashCodeExecutionResultBlock } from "@anthropic-ai/sdk/resources/beta.mjs";
+import { exactHunksContent, type FileChange, type PatchHunk } from "../../diff.js";
+import type { ClientCapabilities } from "../client-capabilities.js";
 import { structuredResult, textContent, toAcpContentUpdate } from "../content.js";
 import type { ToolReporter, ToolResultContext, ToolResultFacts, ToolUseFacts } from "../facts.js";
+
+/**
+ * The files that a Bash command changed in the git working tree, which Claude
+ * Code reports when `bashEditDiffEnabled` (or `CLAUDE_CODE_BASH_EDIT_DIFF`) is
+ * on. The SDK types leave this field out, because it is internal to Claude
+ * Code. For example, `sed -i s/beta/BETA/ f.txt` gives
+ * `{ files: [{ filePath: "/repo/f.txt", hunks: [...] }], moreFiles: 0, changedFiles: ["/repo/f.txt"] }`.
+ */
+interface BashEditDiff {
+  /** At most 5 files. A binary file or a file too large to show has no hunks. */
+  files: { filePath: string; hunks: PatchHunk[]; created?: boolean; deleted?: boolean }[];
+  /** The changed files that `files` leaves out. */
+  moreFiles: number;
+  /** Every changed file that Claude Code knows, at most 200 absolute paths. */
+  changedFiles?: string[];
+  /** Claude Code could not tell every change of the command. */
+  unavailable?: boolean;
+  /** Claude Code does not diff this command, such as a `git checkout`. */
+  skipped?: boolean;
+}
 
 /**
  * Reads a Bash or PowerShell input's description the way the CLI validates it.
@@ -34,7 +57,7 @@ export class BashReporter implements ToolReporter {
     return context.capabilities.terminalOutput ? this.toolResult(context) : undefined;
   }
 
-  toolResult({ result, structured }: ToolResultContext): ToolResultFacts {
+  toolResult({ result, structured, capabilities }: ToolResultContext): ToolResultFacts {
     const content = result.content;
     const isError = result.is_error === true;
     // The output comes from one of these forms:
@@ -56,7 +79,7 @@ export class BashReporter implements ToolReporter {
     let exitCode: number | undefined = isError ? undefined : 0;
     let interrupted = false;
 
-    const structuredBash = structuredResult<BashOutput>(structured);
+    const structuredBash = structuredResult<BashOutput & { bashEditDiff?: unknown }>(structured);
     if (
       structuredBash &&
       typeof structuredBash.stdout === "string" &&
@@ -118,8 +141,75 @@ export class BashReporter implements ToolReporter {
         ...(exitCode !== undefined ? { exitCode } : {}),
         ...(interrupted ? { interrupted } : {}),
       },
+      ...editDiffFacts(structuredBash?.bashEditDiff, capabilities),
     };
   }
+}
+
+/** The diffs and the locations of the files that a Bash command changed. */
+function editDiffFacts(
+  value: unknown,
+  capabilities: ClientCapabilities,
+): Pick<ToolResultFacts, "content" | "locations"> {
+  const diff = parseBashEditDiff(value);
+  if (!diff || diff.skipped || (diff.files.length === 0 && diff.moreFiles === 0)) return {};
+  const form = capabilities.v2 ? "v2" : capabilities.diffPatch ? "air" : undefined;
+  const content: ToolCallContent[] = [];
+  const locations: ToolCallLocation[] = [];
+  for (const file of diff.files) {
+    const change: FileChange = file.created ? "create" : file.deleted ? "delete" : "update";
+    // A file without hunks, such as a binary file, gets only its location.
+    // A deleted file has no new line to point at.
+    if (file.hunks.length === 0 || change === "delete") {
+      locations.push({ path: file.filePath });
+    } else {
+      locations.push(
+        ...file.hunks.map(({ newStart }) => ({ path: file.filePath, line: newStart })),
+      );
+    }
+    if (file.hunks.length > 0) {
+      content.push(...exactHunksContent(file.filePath, change, file.hunks, form));
+    }
+  }
+  const shown = new Set(diff.files.map((file) => file.filePath));
+  for (const path of diff.changedFiles ?? []) {
+    if (!shown.has(path)) locations.push({ path });
+  }
+  const note = changeNote(diff);
+  if (note) content.push(textContent(note));
+  return {
+    ...(content.length > 0 ? { content } : {}),
+    ...(locations.length > 0 ? { locations } : {}),
+  };
+}
+
+/**
+ * The note on the changes that have no diff, such as `2 more files changed`.
+ * Returns undefined when every change has a diff.
+ */
+function changeNote({ files, moreFiles, unavailable }: BashEditDiff): string | undefined {
+  if (moreFiles === 0) return unavailable ? "Part of the diff is unavailable" : undefined;
+  const more = files.length > 0 ? " more" : "";
+  const note = `${moreFiles}${more} ${moreFiles === 1 ? "file" : "files"} changed`;
+  return unavailable ? `${note} (part of the diff is unavailable)` : note;
+}
+
+/** The `bashEditDiff` of a Bash output, or undefined when it has another shape. */
+function parseBashEditDiff(value: unknown): BashEditDiff | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const diff = value as Partial<BashEditDiff>;
+  if (!Array.isArray(diff.files) || typeof diff.moreFiles !== "number") return undefined;
+  const wellFormed = diff.files.every(
+    (file) =>
+      typeof file?.filePath === "string" &&
+      Array.isArray(file.hunks) &&
+      file.hunks.every((hunk) => Array.isArray(hunk?.lines)),
+  );
+  if (!wellFormed) return undefined;
+  const changedFiles = Array.isArray(diff.changedFiles)
+    ? diff.changedFiles.filter((path): path is string => typeof path === "string")
+    : undefined;
+  return { ...(diff as BashEditDiff), changedFiles };
 }
 
 /**

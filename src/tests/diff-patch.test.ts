@@ -391,6 +391,14 @@ describe("git patch headers", () => {
     );
   });
 
+  it("writes a deleted file header", () => {
+    expect(
+      gitPatchText("/f", "delete", [{ ...hunk, newStart: 0, newLines: 0, lines: ["-a"] }]),
+    ).toBe(
+      "diff --git a/f b/f\ndeleted file mode 100644\n--- a/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n",
+    );
+  });
+
   it("uses one header form for previews and hook patches", async () => {
     const filePath = await temporaryFile();
     const preview = patchText(

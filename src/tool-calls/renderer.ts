@@ -388,6 +388,8 @@ export class AcpToolCallRenderer {
     // output keys off that id. A non-string id is no id at all.
     const idOf = (id: unknown) => (typeof id === "string" && id.length > 0 ? id : undefined);
     const terminalId = idOf(toolUse.id) ?? idOf(result.tool_use_id);
+    // The files that the command changed follow the output.
+    const changes = fields.content ?? [];
     // Without a terminal id nothing can match the output. A client that
     // buffers output for an unknown terminal would hold it forever, so the
     // output becomes a code block instead.
@@ -397,9 +399,11 @@ export class AcpToolCallRenderer {
         ...fields,
         // A client that is not AIR gets the terminal content again, like
         // upstream: it replaces a denial text that an earlier update showed.
-        ...(this.capabilities.air.client
+        // AIR gets it again only with the changes, because `content` replaces
+        // the terminal of the tool call.
+        ...(this.capabilities.air.client && changes.length === 0
           ? {}
-          : { content: [{ type: "terminal" as const, terminalId }] }),
+          : { content: [{ type: "terminal" as const, terminalId }, ...changes] }),
         _meta: {
           terminal_info: { terminal_id: terminalId },
           ...(this.capabilities.terminalOutputDelta
@@ -430,6 +434,7 @@ export class AcpToolCallRenderer {
                 text: `\`\`\`console\n${command.output.trimEnd()}\n\`\`\``,
               },
             },
+            ...changes,
           ],
         }
       : fields;

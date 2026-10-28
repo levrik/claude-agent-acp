@@ -54,6 +54,47 @@ export const SCENARIOS: Scenario[] = [
     ],
   },
   {
+    name: "bash-edit-diff",
+    turns: [
+      async function* (ctx) {
+        const bashEditDiff = {
+          files: [
+            {
+              filePath: `${ctx.cwd}/f.txt`,
+              hunks: [
+                {
+                  oldStart: 1,
+                  oldLines: 3,
+                  newStart: 1,
+                  newLines: 3,
+                  lines: [" alpha", "-beta", "+BETA", " gamma"],
+                },
+              ],
+            },
+            {
+              filePath: `${ctx.cwd}/old.txt`,
+              hunks: [{ oldStart: 1, oldLines: 1, newStart: 0, newLines: 0, lines: ["-stale"] }],
+              deleted: true,
+            },
+          ],
+          moreFiles: 1,
+          changedFiles: [`${ctx.cwd}/f.txt`, `${ctx.cwd}/old.txt`, `${ctx.cwd}/logo.png`],
+        };
+        const output = { stdout: "", stderr: "", interrupted: false, isImage: false, bashEditDiff };
+        yield* toolCall(
+          ctx,
+          {
+            id: "toolu_bash",
+            name: "Bash",
+            input: { command: "./update.sh", description: "Update files" },
+          },
+          { content: "(Bash completed with no output)", structured: output, hookResponse: output },
+        );
+        yield result();
+      },
+    ],
+  },
+  {
     name: "bash-error",
     turns: [
       async function* (ctx) {

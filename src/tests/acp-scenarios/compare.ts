@@ -33,6 +33,10 @@
  *   that the tool result does not say (see `CommandOutput.exitCode`): 1 for a
  *   failure that names no code or an interrupted command, 0 for a
  *   backgrounded command.
+ * - The result of a Bash or PowerShell tool call also shows the files that
+ *   the command changed, when Claude Code reports them (`bashEditDiff`): diff
+ *   blocks and a note such as `2 more files changed` after the output, and
+ *   their `locations` (see {@link withoutCommandEditDiffs}).
  */
 import type { Recorded } from "./harness.js";
 
@@ -147,6 +151,48 @@ function withoutSandboxNetworkSettlements(traffic: Recorded[]): Recorded[] {
   });
 }
 
+/** The note of `editDiffFacts` in `reporters/bash.ts` on the changes without a diff. */
+const EDIT_DIFF_NOTE = /^(\d+ (more )?files? changed|Part of the diff is unavailable)/u;
+
+/**
+ * `traffic` without the changed files of a command result: the diff blocks
+ * and the note after the output, and the locations of the same update.
+ * origin/main sent none of them.
+ */
+function withoutCommandEditDiffs(traffic: Recorded[]): Recorded[] {
+  const commandCalls = new Set<unknown>();
+  return traffic.map((record) => {
+    const update = updateOf(record);
+    const toolName = ((update?._meta as Json | undefined)?.claudeCode as Json | undefined)
+      ?.toolName;
+    if (
+      update?.sessionUpdate === "tool_call" &&
+      (toolName === "Bash" || toolName === "PowerShell")
+    ) {
+      commandCalls.add(update.toolCallId);
+    }
+    if (
+      update?.sessionUpdate !== "tool_call_update" ||
+      !commandCalls.has(update.toolCallId) ||
+      !Array.isArray(update.content)
+    ) {
+      return record;
+    }
+    const content = (update.content as Json[]).filter((item) => !isEditDiffItem(item));
+    if (content.length === update.content.length) return record;
+    const stripped = without(update, "locations");
+    if (content.length > 0) stripped.content = content;
+    else delete stripped.content;
+    return { ...record, payload: { ...(record.payload as Json), update: stripped } } as Recorded;
+  });
+}
+
+function isEditDiffItem(item: Json): boolean {
+  if (item.type === "diff") return true;
+  const text = (item.content as Json | undefined)?.text;
+  return item.type === "content" && typeof text === "string" && EDIT_DIFF_NOTE.test(text);
+}
+
 /** A copy of `value` without `key`. */
 function without(value: Json, key: string): Json {
   const copy = { ...value };
@@ -253,8 +299,10 @@ export function compareWithBaseline(baseline: Recorded[], traffic: Recorded[]): 
       const update = updateOf(record);
       return !(update?.sessionUpdate === "session_info_update" && Object.keys(update).length === 1);
     });
-  const current = withoutSandboxNetworkSettlements(
-    traffic.map((record) => withoutSessionCapability(record, "systemPrompt")),
+  const current = withoutCommandEditDiffs(
+    withoutSandboxNetworkSettlements(
+      traffic.map((record) => withoutSessionCapability(record, "systemPrompt")),
+    ),
   );
   const violations: string[] = [];
   const state = new Map<string, Map<string, string>>();

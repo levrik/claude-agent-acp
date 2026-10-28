@@ -4321,6 +4321,214 @@ describe("structured tool_use_result rendering (Read/Bash/WebSearch)", () => {
         expect(exitCode(air, result, toolUseResult)).toBe(airCode);
       });
     });
+
+    describe("edit diff", () => {
+      const sedToolUse = { ...bashToolUse, input: { command: "sed -i '' s/beta/BETA/ f.txt" } };
+      const sedResult: ToolResultBlockParam = {
+        type: "tool_result",
+        tool_use_id: "toolu_bash",
+        content: "(Bash completed with no output)",
+      };
+      const updatedFile = {
+        filePath: "/repo/f.txt",
+        hunks: [
+          {
+            oldStart: 1,
+            oldLines: 3,
+            newStart: 1,
+            newLines: 3,
+            lines: [" alpha", "-beta", "+BETA", " gamma"],
+          },
+        ],
+      };
+      const createdFile = {
+        filePath: "/repo/new.txt",
+        hunks: [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 1, lines: ["+fresh"] }],
+        created: true,
+      };
+      const deletedFile = {
+        filePath: "/repo/old.txt",
+        hunks: [{ oldStart: 1, oldLines: 1, newStart: 0, newLines: 0, lines: ["-stale"] }],
+        deleted: true,
+      };
+
+      /** The structured Bash output of a command without output that changed files. */
+      const withEditDiff = (bashEditDiff: unknown, stdout = "") => ({
+        ...structured,
+        stdout,
+        bashEditDiff,
+      });
+      const fields = (
+        capabilities: ToolCallCapabilities,
+        toolUseResult: unknown,
+        result: ToolResultBlockParam = sedResult,
+      ) =>
+        new AcpToolCallRenderer(capabilities).resultFields(
+          sedToolUse,
+          result as Parameters<AcpToolCallRenderer["resultFields"]>[1],
+          toolUseResult,
+        );
+
+      const zed = ToolCallCapabilities.from({ _meta: { terminal_output: true } });
+      const plain = ToolCallCapabilities.from({});
+      const airPatch = ToolCallCapabilities.from({
+        _meta: {
+          terminal_output_delta: true,
+          jetbrains: { air: { version: 1, capabilities: ["diffPatch"] } },
+        },
+      });
+      const v2 = ToolCallCapabilities.from({}, { v2: true });
+
+      it("shows the terminal, then a standard diff of each changed file", () => {
+        const update = fields(zed, withEditDiff({ files: [updatedFile], moreFiles: 0 }));
+
+        expect(update.content).toEqual([
+          { type: "terminal", terminalId: "toolu_bash" },
+          {
+            type: "diff",
+            path: "/repo/f.txt",
+            oldText: "alpha\nbeta\ngamma",
+            newText: "alpha\nBETA\ngamma",
+          },
+        ]);
+        expect(update.locations).toEqual([{ path: "/repo/f.txt", line: 1 }]);
+      });
+
+      it("shows the console output, then the diff, to a client without a terminal", () => {
+        const update = fields(plain, withEditDiff({ files: [updatedFile], moreFiles: 0 }, "done"));
+
+        expect(update.content).toEqual([
+          { type: "content", content: { type: "text", text: "```console\ndone\n```" } },
+          expect.objectContaining({ type: "diff", path: "/repo/f.txt" }),
+        ]);
+      });
+
+      it("shows only the diff when a command without a terminal printed nothing", () => {
+        const update = fields(plain, withEditDiff({ files: [updatedFile], moreFiles: 0 }));
+
+        expect(update.content).toEqual([expect.objectContaining({ type: "diff" })]);
+      });
+
+      it("shows a created file without old text and a deleted file without new text", () => {
+        const update = fields(
+          zed,
+          withEditDiff({ files: [createdFile, deletedFile], moreFiles: 0 }),
+        );
+
+        expect(update.content?.slice(1)).toEqual([
+          { type: "diff", path: "/repo/new.txt", oldText: null, newText: "fresh" },
+          { type: "diff", path: "/repo/old.txt", oldText: "stale", newText: "" },
+        ]);
+        expect(update.locations).toEqual([
+          { path: "/repo/new.txt", line: 1 },
+          { path: "/repo/old.txt" },
+        ]);
+      });
+
+      it.each([
+        ["an update", updatedFile, ["--- a/repo/f.txt", "+++ b/repo/f.txt"]],
+        [
+          "a creation",
+          createdFile,
+          ["new file mode 100644", "--- /dev/null", "+++ b/repo/new.txt"],
+        ],
+        [
+          "a deletion",
+          deletedFile,
+          ["deleted file mode 100644", "--- a/repo/old.txt", "+++ /dev/null"],
+        ],
+      ])("sends AIR with diffPatch the git patch of %s", (_name, file, headers) => {
+        const update = fields(airPatch, withEditDiff({ files: [file], moreFiles: 0 }));
+
+        expect(update.content?.[0]).toEqual({ type: "terminal", terminalId: "toolu_bash" });
+        const diff = update.content?.[1] as any;
+        expect(diff).toMatchObject({
+          type: "diff",
+          path: file.filePath,
+          oldText: null,
+          newText: "",
+        });
+        const patch: string = diff._meta.jetbrains.air.diffPatch.text;
+        expect(patch.split("\n")).toEqual(expect.arrayContaining(headers));
+        expect(patch).toContain(file.hunks[0].lines.join("\n"));
+      });
+
+      it.each([
+        ["an update", updatedFile, "modify"],
+        ["a creation", createdFile, "add"],
+        ["a deletion", deletedFile, "delete"],
+      ])("sends a v2 client the change and patch of %s", (_name, file, operation) => {
+        const update = fields(v2, withEditDiff({ files: [file], moreFiles: 0 }));
+
+        expect(update.content?.[1]).toMatchObject({
+          type: "diff",
+          changes: [{ operation, path: file.filePath, fileType: "text" }],
+          patch: { format: "git_patch" },
+        });
+      });
+
+      it("names the changed files that have no diff", () => {
+        const update = fields(
+          zed,
+          withEditDiff({
+            files: [updatedFile, { filePath: "/repo/logo.png", hunks: [] }],
+            moreFiles: 2,
+            changedFiles: ["/repo/f.txt", "/repo/logo.png", "/repo/a.txt", "/repo/b.txt"],
+          }),
+        );
+
+        expect(update.content?.slice(1)).toEqual([
+          expect.objectContaining({ type: "diff", path: "/repo/f.txt" }),
+          { type: "content", content: { type: "text", text: "2 more files changed" } },
+        ]);
+        expect(update.locations).toEqual([
+          { path: "/repo/f.txt", line: 1 },
+          { path: "/repo/logo.png" },
+          { path: "/repo/a.txt" },
+          { path: "/repo/b.txt" },
+        ]);
+      });
+
+      it("says when part of the diff is unavailable", () => {
+        const update = fields(
+          zed,
+          withEditDiff({
+            files: [],
+            moreFiles: 1,
+            changedFiles: ["/repo/big.bin"],
+            unavailable: true,
+          }),
+        );
+
+        expect(update.content).toEqual([
+          { type: "terminal", terminalId: "toolu_bash" },
+          {
+            type: "content",
+            content: { type: "text", text: "1 file changed (part of the diff is unavailable)" },
+          },
+        ]);
+        expect(update.locations).toEqual([{ path: "/repo/big.bin" }]);
+      });
+
+      it.each<[string, unknown]>([
+        ["a skipped diff", { files: [], moreFiles: 0, skipped: true }],
+        ["an unavailable diff without files", { files: [], moreFiles: 0, unavailable: true }],
+        ["a malformed diff", { files: "f.txt", moreFiles: 0 }],
+        ["a malformed file", { files: [{ filePath: 1, hunks: [] }], moreFiles: 0 }],
+        ["no diff", undefined],
+      ])("shows only the terminal for %s", (_name, bashEditDiff) => {
+        const update = fields(zed, withEditDiff(bashEditDiff));
+
+        expect(update.content).toEqual([{ type: "terminal", terminalId: "toolu_bash" }]);
+        expect(update.locations).toBeUndefined();
+      });
+
+      it("keeps AIR's terminal content unsent when the command changed nothing", () => {
+        const update = fields(airPatch, withEditDiff(undefined));
+
+        expect(update.content).toBeUndefined();
+      });
+    });
   });
 
   describe("WebSearch", () => {

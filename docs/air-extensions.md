@@ -73,6 +73,14 @@ The adapter leaves out only repeated data for such a client:
 - Streamed subagent text is not sent again in full when the complete message arrives, for a client that gets the complete message.
 - A compaction summary is not sent again in full when the chunks that went out before it hold the same text.
 
+Every client gets the files that a Bash or PowerShell command changed, which the upstream adapter does not show.
+Claude Code reports them as `bashEditDiff` in the tool output when `bashEditDiffEnabled` or `CLAUDE_CODE_BASH_EDIT_DIFF` is on.
+The result of the command then holds, after the terminal or the output:
+
+- a diff of each file that Claude Code shows, at most 5: a standard diff of each hunk, an exact git patch for AIR with `diffPatch`, or a v2 diff;
+- a note on the changed files without a diff, such as `2 more files changed`;
+- a `locations` entry for each hunk and each other changed file.
+
 Every client gets `session/list` in pages of at most 1000 sessions.
 A page with more sessions after it has a `nextCursor`, as ACP defines.
 A client that does not follow `nextCursor` sees only the newest 1000 sessions of the directory.

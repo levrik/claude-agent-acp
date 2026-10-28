@@ -39,7 +39,7 @@ const NO_NEWLINE_MARKER = "\\ No newline at end of file";
  * A side with zero lines stores the number of the line after the change as its
  * start. {@link hunkHeader} converts that start to the git convention.
  */
-interface PatchHunk {
+export interface PatchHunk {
   oldStart: number;
   oldLines: number;
   newStart: number;
@@ -72,7 +72,7 @@ interface EditPreviewInput {
 }
 
 /** The kind of file change that a git patch describes. */
-type FileChange = "create" | "update";
+export type FileChange = "create" | "update" | "delete";
 
 /** A file change and the hunks of its git patch. */
 interface FilePatch {
@@ -303,33 +303,7 @@ export function toolUpdateFromDiffToolResponse(toolResponse: unknown): {
   const response = toolResponse as DiffToolResponse;
   if (!response.filePath || !Array.isArray(response.structuredPatch)) return {};
 
-  const content: ToolCallContent[] = [];
-  const locations: ToolCallLocation[] = [];
-  for (const { lines, newStart } of response.structuredPatch) {
-    const oldText: string[] = [];
-    const newText: string[] = [];
-    for (const line of lines) {
-      if (line.startsWith("-")) {
-        oldText.push(line.slice(1));
-      } else if (line.startsWith("+")) {
-        newText.push(line.slice(1));
-      } else if (line === NO_NEWLINE_MARKER) {
-        continue;
-      } else {
-        oldText.push(line.slice(1));
-        newText.push(line.slice(1));
-      }
-    }
-    if (oldText.length > 0 || newText.length > 0) {
-      locations.push({ path: response.filePath, line: newStart });
-      content.push({
-        type: "diff",
-        path: response.filePath,
-        oldText: oldText.join("\n") || null,
-        newText: newText.join("\n"),
-      });
-    }
-  }
+  const { content, locations } = hunkDiffs(response.filePath, response.structuredPatch);
 
   // A Write `update` can arrive with an empty structuredPatch — nothing
   // changed, the diff timed out, or the previous content was too large to
@@ -366,6 +340,60 @@ export function toolUpdateFromDiffToolResponse(toolResponse: unknown): {
   if (content.length > 0) result.content = content;
   if (locations.length > 0) result.locations = locations;
   return result;
+}
+
+/**
+ * One standard diff per hunk, with the old and the new lines of the hunk,
+ * and the location of each hunk.
+ */
+function hunkDiffs(
+  filePath: string,
+  hunks: PatchHunk[],
+): { content: ToolCallContent[]; locations: ToolCallLocation[] } {
+  const content: ToolCallContent[] = [];
+  const locations: ToolCallLocation[] = [];
+  for (const { lines, newStart } of hunks) {
+    const oldText: string[] = [];
+    const newText: string[] = [];
+    for (const line of lines) {
+      if (line.startsWith("-")) {
+        oldText.push(line.slice(1));
+      } else if (line.startsWith("+")) {
+        newText.push(line.slice(1));
+      } else if (line === NO_NEWLINE_MARKER) {
+        continue;
+      } else {
+        oldText.push(line.slice(1));
+        newText.push(line.slice(1));
+      }
+    }
+    if (oldText.length > 0 || newText.length > 0) {
+      locations.push({ path: filePath, line: newStart });
+      content.push({
+        type: "diff",
+        path: filePath,
+        oldText: oldText.join("\n") || null,
+        newText: newText.join("\n"),
+      });
+    }
+  }
+  return { content, locations };
+}
+
+/**
+ * The content of a file change whose hunks match the file exactly, such as
+ * hunks that git computed: a patch in the given form, or the standard diffs
+ * of the hunks without a form.
+ */
+export function exactHunksContent(
+  filePath: string,
+  change: FileChange,
+  hunks: PatchHunk[],
+  form?: PatchForm,
+): ToolCallContent[] {
+  return form
+    ? [patchContent(filePath, { change, hunks }, form)]
+    : hunkDiffs(filePath, hunks).content;
 }
 
 /**
@@ -450,8 +478,9 @@ function gitPatchHeader(filePath: string, change: FileChange, paths: GitPatchPat
   return [
     `diff --git ${oldName} ${newName}`,
     ...(change === "create" ? ["new file mode 100644"] : []),
+    ...(change === "delete" ? ["deleted file mode 100644"] : []),
     `--- ${change === "create" ? "/dev/null" : `${oldName}${tab}`}`,
-    `+++ ${newName}${tab}`,
+    `+++ ${change === "delete" ? "/dev/null" : `${newName}${tab}`}`,
   ];
 }
 
@@ -728,7 +757,9 @@ export function v2DiffContent(
   const fileChange: v2.DiffChange =
     change === "create"
       ? { operation: "add", path: filePath, fileType: "text" }
-      : { operation: "modify", path: filePath, fileType: "text" };
+      : change === "delete"
+        ? { operation: "delete", path: filePath, fileType: "text" }
+        : { operation: "modify", path: filePath, fileType: "text" };
   const diff: V2DiffContent = {
     type: "diff",
     changes: [fileChange],
